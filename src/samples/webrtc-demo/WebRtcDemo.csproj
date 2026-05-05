@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>WebRtcDemo</AssemblyName>
+    <RootNamespace>WebRtcDemo</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      SIPSorcery provides a pure-managed .NET WebRTC stack (RTCPeerConnection,
+      RTCDataChannel, ICE agent, DTLS-SRTP, etc.) without native dependencies.
+      This is the most suitable library for embedding WebRTC in a .NET process.
+    -->
+    <PackageReference Include="SIPSorcery" Version="6.2.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>

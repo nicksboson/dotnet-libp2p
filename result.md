@@ -1,0 +1,230 @@
+# WebRTC Prototype — Result Report
+
+## Quick Summary
+
+I built a working WebRTC prototype using SIPSorcery to understand how WebRTC can function as a transport layer in dotnet-libp2p.
+
+The prototype establishes a peer-to-peer connection using DataChannel, successfully exchanges messages, and helped me map WebRTC into the libp2p pipeline:
+
+WebRTC → DataChannel → Channel → Upgrade → Session
+
+This exercise clarified how WebRTC can replace TCP as a transport while integrating with the existing architecture.
+
+This also helped me clearly understand how transport responsibilities are separated from security (Noise/TLS) and multiplexing (Yamux) in libp2p.
+
+## 1. What Has Been Implemented
+
+### Project Structure
+
+```
+src/samples/webrtc-demo/
+├── WebRtcDemo.csproj              # Standalone console project (net8.0, SIPSorcery 6.2.1)
+├── Program.cs                     # Entry point: in-process two-peer demo
+├── Transport/
+│   ├── IWebRtcChannel.cs          # Abstraction layer (mirrors libp2p IChannel)
+│   └── DataChannelAdapter.cs      # RTCDataChannel → IWebRtcChannel bridge
+└── WebRtc/
+    └── WebRtcPeer.cs              # RTCPeerConnection lifecycle wrapper
+```
+
+### Components
+
+| Component | Role |
+|---|---|
+| `IWebRtcChannel` | Transport abstraction interface — mirrors `Nethermind.Libp2p.Core.IChannel` |
+| `DataChannelAdapter` | Wraps `RTCDataChannel` (SIPSorcery) into `IWebRtcChannel`; bridges events to a blocking queue |
+| `WebRtcPeer` | Manages `RTCPeerConnection`: creates offer, accepts answer, handles ICE, wires DataChannel |
+| `Program.cs` | Simulates two peers (PeerA + PeerB) in-process with in-memory signaling |
+
+### What the Prototype Demonstrates
+
+1. **Peer A** creates a DataChannel and generates an SDP offer.
+2. **Peer B** accepts the offer, generates an SDP answer (in-memory exchange — no network signaling server).
+3. ICE negotiation completes (`ICE state → checking → connected`).
+4. DTLS handshake completes (`Connection state → connecting → connected`).
+5. DataChannel `libp2p-data` opens on **both** peers.
+6. Peer A sends 4 UTF-8 messages; Peer B receives all 4 correctly and logs them.
+7. Both peers close gracefully.
+
+### Verified Console Output (Excerpt)
+
+```
+[PeerA] DataChannel 'libp2p-data' is OPEN ✓
+[PeerB] DataChannel 'libp2p-data' is OPEN ✓
+[Main]  Both DataChannels are open — starting message exchange
+
+[PeerA] → Sending: "Hello from Peer A! 👋"
+[PeerB] ✉  Received: "Hello from Peer A! 👋"
+[PeerA] → Sending: "This message travels over a WebRTC DataChannel"
+[PeerB] ✉  Received: "This message travels over a WebRTC DataChannel"
+[PeerA] → Sending: "In libp2p, this byte-stream feeds into Noise → Yamux → protocol handlers"
+[PeerB] ✉  Received: "In libp2p, this byte-stream feeds into Noise → Yamux → protocol handlers"
+[PeerA] → Sending: "Goodbye!"
+[PeerB] ✉  Received: "Goodbye!"
+[PeerB] All messages received ✓
+
+  Prototype complete — DataChannel exchange succeeded!
+```
+This confirmed that DataChannel can be treated as the transport-level byte stream required by libp2p.
+---
+
+## 2. Why WebRTC Can Be Better Than TCP in This Context
+
+From this prototype, the biggest difference I observed compared to TCP is that WebRTC solves connectivity problems (NAT, browser support) at the transport level itself, rather than relying on external mechanisms.
+
+### What TCP Provides (and Its Limitations)
+
+| TCP Capability | Limitation in libp2p / P2P Context |
+|---|---|
+| Reliable byte stream | Requires open ports and public IPs |
+| Direct connection | Fails when both peers are behind NAT |
+| No built-in encryption | Needs Noise / TLS layered on top |
+| No multiplexing | Needs Yamux layered on top |
+| No browser support | Cannot run natively in web browsers |
+
+### What WebRTC Replaces / Improves
+
+| What Changed from TCP | How WebRTC Addresses It |
+|---|---|
+| **NAT traversal** | WebRTC has ICE (Interactive Connectivity Establishment) built in, which uses STUN/TURN to punch through NATs without open ports |
+| **Security** | DTLS (Datagram TLS) is mandatory in WebRTC — encryption is built into the transport, unlike raw TCP |
+| **Multiplexing** | A single `RTCPeerConnection` can carry multiple `RTCDataChannel`s — each channel maps to a libp2p stream |
+| **Browser compatibility** | WebRTC is the only P2P transport natively available in browsers; TCP is not accessible from browser JS |
+| **Connection setup** | WebRTC's offer/answer SDP exchange can happen over any signaling medium, making it transport-agnostic at setup time |
+| **Congestion control** | DataChannels running over SCTP/DTLS have their own congestion control, making them resilient to packet loss |
+
+### Mapping to libp2p Architecture
+
+```
+TCP Stack                WebRTC Equivalent
+─────────────────────    ────────────────────────────────
+TCP Socket               RTCPeerConnection + RTCDataChannel
+socket.ConnectAsync()    ICE + DTLS handshake
+socket.SendAsync()       dataChannel.send()
+socket.ReceiveAsync()    dataChannel.onmessage
+IChannel (libp2p)        DataChannelAdapter (this prototype)
+connectionCtx.Upgrade()  Called after DataChannel opens ← integration hook
+```
+
+---
+
+## 3. What Is Currently Missing from the Implementation
+
+| Missing Feature | Details |
+|---|---|
+| **Real network signaling** | SDP is exchanged in-memory. A production system needs a WebSocket / libp2p-stream signaling channel between remote machines |
+| **STUN / TURN servers** | No ICE servers configured (`iceServers = []`). Without these, the connection only works in loopback / same-LAN scenarios |
+| **`ITransportProtocol` implementation** | No `WebRtcTransport : ITransportProtocol` class exists. The prototype does not plug into the libp2p `DialAsync` / `ListenAsync` pipeline |
+| **`connectionCtx.Upgrade()` call** | The comment in `WebRtcPeer.WireChannel()` marks where `Upgrade()` should be called but it is not yet called |
+| **Bidirectional I/O bridge** | The read/write loops that forward data between `DataChannelAdapter` and the libp2p `IChannel` (like IpTcpProtocol has) are not implemented |
+| **Multiaddress support** | No `WebRTC` multiaddress protocol component; cannot express WebRTC endpoints in libp2p multiaddr format |
+| **Multiple DataChannels** | Only one channel is created; libp2p stream multiplexing requires multiple channels per session |
+| **Transport registration** | WebRTC transport is not yet registered within the transport selection mechanism of LocalPeer |
+| **Error handling** | No reconnection logic, ICE failure recovery, or graceful backoff |
+| **Noise / TLS protocol** | DTLS in WebRTC handles encryption at the transport level, but Noise (used by libp2p) would still need to be wired through the Upgrade chain |
+
+---
+
+## 4. Errors Encountered During Testing and How to Fix Them
+
+### Error 1 — `SetDescriptionResultEnum` has no `GetAwaiter`
+
+```
+error CS1061: 'SetDescriptionResultEnum' does not contain a definition for 'GetAwaiter'
+```
+
+**Cause:** SIPSorcery 6.2.1's `setLocalDescription()` returns `Task` (void-async), and `setRemoteDescription()` returns `SetDescriptionResultEnum` synchronously. Initial code tried to `await` both as if they returned `Task<SetDescriptionResultEnum>`.
+
+**Fix:** `await _peerConnection.setLocalDescription(offer)` (discard result); `_peerConnection.setRemoteDescription(offer)` without await, store the `SetDescriptionResultEnum` directly.
+
+---
+
+### Error 2 — Cannot convert `void` to `SetDescriptionResultEnum`
+
+```
+error CS0029: Cannot implicitly convert type 'void' to 'SIPSorcery.Net.SetDescriptionResultEnum'
+```
+
+**Cause:** Intermediate fix stored the result of `await setLocalDescription()` into a `SetDescriptionResultEnum` variable, but the awaited result is `void`.
+
+**Fix:** Do not capture a variable from `await setLocalDescription()`; only store and check the return from `setRemoteDescription()`.
+
+---
+
+### Error 3 — `TaskCanceledException` on `ReceiveAsync`
+
+```
+System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at Program.<Main>$(String[] args) in Program.cs:line 74
+```
+
+**Cause:** On the answerer side (Peer B), the `ondatachannel` event fires after the DataChannel's `onopen` event has already fired. The `DataChannelAdapter` registered the `onopen` handler too late, so `ChannelReady` never resolved within the timeout.
+
+**Fix:** After wiring all event handlers, check `_dataChannel.readyState == RTCDataChannelState.open`. If already open, fire `OnOpen` immediately via `Task.Run(() => OnOpen?.Invoke())`.
+
+---
+
+### Error 4 — `net9.0` framework not found at runtime
+
+```
+Framework: 'Microsoft.NETCore.App', version '9.0.0' (x64) — not found
+Available: 6.0.16, 8.0.21, 8.0.25, 10.0.7
+```
+
+**Cause:** `WebRtcDemo.csproj` originally targeted `net9.0`, which is not installed on this machine.
+
+**Fix:** Changed `<TargetFramework>` to `net8.0` (present) in `WebRtcDemo.csproj`.
+
+---
+
+## 5. Remaining Work Required to Make This Production-Ready
+
+### Phase 1 — libp2p Integration (Most Critical)
+
+- [ ] Implement `WebRtcTransport : ITransportProtocol` with `ListenAsync()` and `DialAsync()`.
+- [ ] Inside `WireChannel()`, call `connectionCtx.Upgrade()` when the DataChannel opens.
+- [ ] Create read/write forwarding loops (same pattern as `IpTcpProtocol`):
+  ```csharp
+  // Read from DataChannel → write into libp2p upChannel
+  Task readTask = Task.Run(async () => {
+      while (channel.IsOpen) {
+          byte[] data = await adapter.ReceiveAsync(token);
+          await upChannel.WriteAsync(new ReadOnlySequence<byte>(data));
+      }
+  });
+  // Read from libp2p upChannel → write into DataChannel
+  Task writeTask = Task.Run(async () => {
+      await foreach (var data in upChannel.ReadAllAsync(token))
+          await adapter.SendAsync(data.ToArray());
+  });
+  await Task.WhenAny(readTask, writeTask).ContinueWith(_ => connectionCtx.Dispose());
+  ```
+
+### Phase 2 — NAT Traversal
+
+- [ ] Configure STUN servers (e.g., `stun:stun.l.google.com:19302`) in `RTCConfiguration.iceServers`.
+- [ ] Optionally add a TURN server for symmetric NAT environments.
+- [ ] Add ICE candidate trickle support (exchange individual candidates, not just full SDP).
+
+### Phase 3 — Real Signaling Channel
+
+- [ ] Implement a `WebRtcSignaler` that exchanges offer/answer SDP over a libp2p stream or WebSocket.
+- [ ] Define a `WebRTC` multiaddress component (e.g., `/ip4/1.2.3.4/udp/4321/webrtc-direct`).
+- [ ] Register the address format in `IpTcpProtocol.IsAddressMatch()` equivalent.
+
+### Phase 4 — Multi-Stream Support
+
+- [ ] Map each libp2p stream to a separate `RTCDataChannel` (using negotiated channel IDs).
+- [ ] Handle DataChannel lifecycle (open, close, error) per stream.
+
+### Phase 5 — Testing and Observability
+
+- [ ] Add unit tests for `DataChannelAdapter` (mock `RTCDataChannel`).
+- [ ] Add integration tests for the offer/answer flow.
+- [ ] Wire OpenTelemetry tracing (same as existing protocols use `Activity`).
+- [ ] Test cross-implementation interoperability with js-libp2p and go-libp2p WebRTC transports.
+
+### Phase 6 — Security
+
+- [ ] Decide whether Noise runs *on top of* DTLS or DTLS is replaced by Noise (per libp2p WebRTC spec).
+- [ ] Implement peer identity verification using `RTCPeerConnection.certificate` or Noise handshake fingerprint.
