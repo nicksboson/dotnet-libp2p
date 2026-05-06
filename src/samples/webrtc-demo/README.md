@@ -22,3 +22,17 @@ dotnet run
 ...
   Prototype complete -> DataChannel exchange succeeded!
 ```
+
+## How this maps to libp2p
+
+This prototype helped in understanding how WebRTC can be integrated as a transport layer in dotnet-libp2p.
+
+Conceptually, the flow is:
+
+WebRTC PeerConnection → DataChannel → libp2p Channel → Upgrade → Session
+
+- The `DataChannel` acts as the transport-level byte stream
+- It can be adapted into a libp2p-compatible channel
+- The existing upgrade pipeline (security + multiplexing) can remain unchanged
+
+This confirms that WebRTC can replace TCP at the transport layer while preserving the overall architecture.
