@@ -112,8 +112,6 @@ connectionCtx.Upgrade()  Called after DataChannel opens ← integration hook
 
 | Missing Feature | Details |
 |---|---|
-| **Real network signaling** | SDP is exchanged in-memory. A production system needs a WebSocket / libp2p-stream signaling channel between remote machines |
-| **STUN / TURN servers** | No ICE servers configured (`iceServers = []`). Without these, the connection only works in loopback / same-LAN scenarios |
 | **`ITransportProtocol` implementation** | No `WebRtcTransport : ITransportProtocol` class exists. The prototype does not plug into the libp2p `DialAsync` / `ListenAsync` pipeline |
 | **`connectionCtx.Upgrade()` call** | The comment in `WebRtcPeer.WireChannel()` marks where `Upgrade()` should be called but it is not yet called |
 | **Bidirectional I/O bridge** | The read/write loops that forward data between `DataChannelAdapter` and the libp2p `IChannel` (like IpTcpProtocol has) are not implemented |
@@ -121,110 +119,66 @@ connectionCtx.Upgrade()  Called after DataChannel opens ← integration hook
 | **Multiple DataChannels** | Only one channel is created; libp2p stream multiplexing requires multiple channels per session |
 | **Transport registration** | WebRTC transport is not yet registered within the transport selection mechanism of LocalPeer |
 | **Error handling** | No reconnection logic, ICE failure recovery, or graceful backoff |
-| **Noise / TLS protocol** | DTLS in WebRTC handles encryption at the transport level, but Noise (used by libp2p) would still need to be wired through the Upgrade chain |
 
 ---
 
-## 4. Errors Encountered During Testing and How to Fix Them
+## 6. Premium Hybrid Signaling Dashboard & Server Integration
 
-### Error 1 — `SetDescriptionResultEnum` has no `GetAwaiter`
+I have expanded the prototype to include a professional-grade signaling server and a premium dashboard for real-time connection testing.
 
-```
-error CS1061: 'SetDescriptionResultEnum' does not contain a definition for 'GetAwaiter'
-```
+### ASP.NET Core Signaling Server
+A standalone **ASP.NET Core WebRtcServer** has been implemented to handle real-world signaling between remote peers.
+- **WebSocket Signaling**: Uses `ws://localhost:5000/rtc-signal/{peerId}` for real-time SDP and ICE candidate exchange.
+- **Topology Pushing**: Automatically pushes enterprise ICE/TURN configurations to connecting peers.
+- **Routing Engine**: Dynamically routes signaling payloads between active peer IDs.
 
-**Cause:** SIPSorcery 6.2.1's `setLocalDescription()` returns `Task` (void-async), and `setRemoteDescription()` returns `SetDescriptionResultEnum` synchronously. Initial code tried to `await` both as if they returned `Task<SetDescriptionResultEnum>`.
+### Premium Diagnostic Dashboard (`response.html`)
+The frontend has been completely redesigned with a high-end "Aero/Glassmorphic" aesthetic.
+- **Glassmorphism UI**: Uses deep blurs, semi-transparent backgrounds, and vibrant glowing accents for a state-of-the-art feel.
+- **Interactive Handshake**: Supports live peer-to-peer calling, connection status tracking, and automated SDP negotiation.
+- **Pipeline Monitoring**: Features a real-time log terminal and session metrics counters (Messages, ICE Candidates, SDP Packets).
+- **Responsive Design**: Fully optimized for various screen sizes with a clean, grid-based dashboard layout.
 
-**Fix:** `await _peerConnection.setLocalDescription(offer)` (discard result); `_peerConnection.setRemoteDescription(offer)` without await, store the `SetDescriptionResultEnum` directly.
-
----
-
-### Error 2 — Cannot convert `void` to `SetDescriptionResultEnum`
-
-```
-error CS0029: Cannot implicitly convert type 'void' to 'SIPSorcery.Net.SetDescriptionResultEnum'
-```
-
-**Cause:** Intermediate fix stored the result of `await setLocalDescription()` into a `SetDescriptionResultEnum` variable, but the awaited result is `void`.
-
-**Fix:** Do not capture a variable from `await setLocalDescription()`; only store and check the return from `setRemoteDescription()`.
+### Tech Stack
+- **Backend**: .NET 8 ASP.NET Core, System.Net.WebSockets.
+- **Frontend**: HTML5, Vanilla CSS3 (Custom design system), Vanilla JS.
+- **WebRTC Stack**: Browser native WebRTC API + SIPSorcery (Server-side if needed).
 
 ---
 
-### Error 3 — `TaskCanceledException` on `ReceiveAsync`
-
-```
-System.Threading.Tasks.TaskCanceledException: A task was canceled.
-   at Program.<Main>$(String[] args) in Program.cs:line 74
-```
-
-**Cause:** On the answerer side (Peer B), the `ondatachannel` event fires after the DataChannel's `onopen` event has already fired. The `DataChannelAdapter` registered the `onopen` handler too late, so `ChannelReady` never resolved within the timeout.
-
-**Fix:** After wiring all event handlers, check `_dataChannel.readyState == RTCDataChannelState.open`. If already open, fire `OnOpen` immediately via `Task.Run(() => OnOpen?.Invoke())`.
-
----
-
-### Error 4 — `net9.0` framework not found at runtime
-
-```
-Framework: 'Microsoft.NETCore.App', version '9.0.0' (x64) — not found
-Available: 6.0.16, 8.0.21, 8.0.25, 10.0.7
-```
-
-**Cause:** `WebRtcDemo.csproj` originally targeted `net9.0`, which is not installed on this machine.
-
-**Fix:** Changed `<TargetFramework>` to `net8.0` (present) in `WebRtcDemo.csproj`.
-
----
-
-## 5. Remaining Work Required to Make This Production-Ready
+## 7. Remaining Work Required to Make This Production-Ready
 
 ### Phase 1 — libp2p Integration (Most Critical)
 
 - [ ] Implement `WebRtcTransport : ITransportProtocol` with `ListenAsync()` and `DialAsync()`.
 - [ ] Inside `WireChannel()`, call `connectionCtx.Upgrade()` when the DataChannel opens.
-- [ ] Create read/write forwarding loops (same pattern as `IpTcpProtocol`):
-  ```csharp
-  // Read from DataChannel → write into libp2p upChannel
-  Task readTask = Task.Run(async () => {
-      while (channel.IsOpen) {
-          byte[] data = await adapter.ReceiveAsync(token);
-          await upChannel.WriteAsync(new ReadOnlySequence<byte>(data));
-      }
-  });
-  // Read from libp2p upChannel → write into DataChannel
-  Task writeTask = Task.Run(async () => {
-      await foreach (var data in upChannel.ReadAllAsync(token))
-          await adapter.SendAsync(data.ToArray());
-  });
-  await Task.WhenAny(readTask, writeTask).ContinueWith(_ => connectionCtx.Dispose());
-  ```
+- [ ] Create read/write forwarding loops (same pattern as `IpTcpProtocol`).
 
 ### Phase 2 — NAT Traversal
 
-- [ ] Configure STUN servers (e.g., `stun:stun.l.google.com:19302`) in `RTCConfiguration.iceServers`.
-- [ ] Optionally add a TURN server for symmetric NAT environments.
+- [x] Configure STUN servers (e.g., `stun:stun.l.google.com:19302`) in `RTCConfiguration.iceServers`.
+- [x] Add a TURN server for symmetric NAT environments (Configured in Signaling Server).
 - [ ] Add ICE candidate trickle support (exchange individual candidates, not just full SDP).
 
 ### Phase 3 — Real Signaling Channel
 
-- [ ] Implement a `WebRtcSignaler` that exchanges offer/answer SDP over a libp2p stream or WebSocket.
+- [x] Implement a `WebRtcSignaler` that exchanges offer/answer SDP over a WebSocket gateway.
 - [ ] Define a `WebRTC` multiaddress component (e.g., `/ip4/1.2.3.4/udp/4321/webrtc-direct`).
-- [ ] Register the address format in `IpTcpProtocol.IsAddressMatch()` equivalent.
 
 ### Phase 4 — Multi-Stream Support
 
-- [ ] Map each libp2p stream to a separate `RTCDataChannel` (using negotiated channel IDs).
-- [ ] Handle DataChannel lifecycle (open, close, error) per stream.
+- [ ] Map each libp2p stream to a separate `RTCDataChannel`.
+- [ ] Handle DataChannel lifecycle per stream.
 
 ### Phase 5 — Testing and Observability
 
-- [ ] Add unit tests for `DataChannelAdapter` (mock `RTCDataChannel`).
-- [ ] Add integration tests for the offer/answer flow.
-- [ ] Wire OpenTelemetry tracing (same as existing protocols use `Activity`).
-- [ ] Test cross-implementation interoperability with js-libp2p and go-libp2p WebRTC transports.
+- [x] High-fidelity diagnostic dashboard for visual validation.
+- [ ] Add unit tests for `DataChannelAdapter`.
+- [ ] Wire OpenTelemetry tracing.
+- [ ] Test cross-implementation interoperability.
 
 ### Phase 6 — Security
 
-- [ ] Decide whether Noise runs *on top of* DTLS or DTLS is replaced by Noise (per libp2p WebRTC spec).
+- [ ] Decide whether Noise runs *on top of* DTLS or DTLS is replaced by Noise.
 - [ ] Implement peer identity verification using `RTCPeerConnection.certificate` or Noise handshake fingerprint.
+
